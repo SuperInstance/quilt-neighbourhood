@@ -14,6 +14,7 @@
   - `P3` concurrent sets → lexicographically smaller diff id wins
   - `P4` remove/remove → idempotent tombstone
   - `P5` concurrent sets on a **numeric** cell → **mean of contributors, summed in canonical order** (lexicographic diff-id order — the contributor *set* determines the sum order, so the result is byte-identical in every merge order). Mixed numeric/non-numeric contributors fall back to P3; removes still win via P2; a causally-later set after a P5 merge is a plain set. NaN/±Infinity are rejected at cell-write time with a receipted rejection.
+  - `P6` **signed sheet** (v0.3.0): every accepted diff must carry a valid **Ed25519 signature over its 32-byte diff id**, verifiable under the public key embedded in the author's did; `signed: { authors: [...] }` additionally pins an author allowlist. Unsigned or badly-signed diffs are rejected with the dedicated receipt kind `reject-sig`.
 - **Receipt chain** — every state change (accept or reject) is sealed: `{seq, kind, payload_sha, prev_sha, sha}`. Flip any entry anywhere and `verifyReceipts()` fails. The chain is the honesty surface.
 
 ## What counts as failure
@@ -36,18 +37,49 @@ The suite (`node --test test/`) states its own failure conditions:
 | NC2 | receipt tamper detected (head and tail) | chain lies |
 | NC3 | merge is monotone (knowledge never shrinks) | re-merge loses anything |
 | NC4 | adversarial floats (0.1, 1/3, 1e-7, 2^53, −0.0) converge through 120 shuffled orders; NaN rejected at write | any order-dependent bit pattern; NaN accepted |
+| S0 | base32 is RFC 4648-exact (no padding, canonical tails); the did embeds the exact public key | a did that does not round-trip its key |
+| S1 | two signers merge into a signed sheet; sigs verify; revision equals the unsigned re-run of the same values | sig entering id/canonical; revision drifting with signatures |
+| S2 | value-flipped and cross-key-signed diffs rejected with receipts in a signed sheet | forgery accepted; un-receipted rejection |
+| NC5 | an unsigned sheet accepts the very diffs a signed sheet rejects (downgrade asymmetry, stated, not hidden) | the asymmetry being hidden |
+| S3 | a validly-signed unknown did is rejected under an allowlist, accepted without one | allowlist ignoring, or proof conflated with policy |
+| S4 | tampering ANY field after signing fails verification; a self-consistent forgery with a stale sig is caught by the signature alone | the sig adding nothing over the content hash |
 
 Negative controls are tests of the guarantees' failure modes — if NC1/NC2 ever pass vacuously, the guarantees are decorative.
+
+## Signed sheets (v0.3.0) — authorship becomes proof
+
+In v0.2.0 `author` was a claim, not a proof. v0.3.0 adds a signature layer (composition — the v0.2.0 modules keep their semantics):
+
+```js
+import { generateKeypair, signDiff, verifyDiff } from "@superinstance/quilt-neighbourhood/src/signed.mjs";
+import { Replica, merge } from "@superinstance/quilt-neighbourhood/src/replica.mjs";
+
+const kp = generateKeypair();                       // { did, publicKey, privateKey } (ed25519, node:crypto)
+const sheet = new Replica("r1", "fleet", {
+  schema: { signed: true },                         // or { signed: { authors: [kp.did, otherDid] } }
+});
+sheet.set("cell", "value", { privateKey: kp.privateKey }); // author defaults to kp.did; unsigned local writes throw (receipted)
+merge(otherReplica, sheet);                         // every accepted diff's sig verified at receive
+```
+
+- **did format**: `did:key:z` + RFC 4648 base32 (alphabet `A-Z2-7`, **no padding**, canonical zero tail bits) of the **raw 32-byte ed25519 public key** — 52 chars after the prefix. The did embeds its own verifying key, so a signature is checkable from the did alone. *Honest note:* this is the coasys-style did:key *pattern* with a study-local encoding — the W3C did:key spec for ed25519 uses base58btc of the multicodec-prefixed key (`0xed 0x01 ‖ raw`) and is NOT interoperable with this flavor.
+- **What is signed**: exactly the **32-byte diff id** (`sig = base64(Ed25519_sign(sha256_digest_bytes_of_canonical(diff-without-sig)))`; since `sig` is excluded from id/canonical computation, that digest is the id). The id is computed before signing; `sig` is an **overlay**: signing/stripping/re-signing never changes the id, so **revisions stay value-pure** — a signed sheet and an unsigned re-run of the same values reach byte-identical revisions (S1 pins this).
+- **Why the sig has teeth**: a tampered-AND-id-recomputed forgery passes the content-hash check (self-consistent) but fails the signature check — only someone holding the author's key can make a (payload, id) pair whose id's signature verifies (S4 pins this).
+- **Receipt taxonomy**: identity broken (tampered payload/stale id) → kind `reject` (v0.2.0 semantics, NC1); identity intact but authorship unproven (missing/malformed sig, unparseable did, sig that does not verify, author off the allowlist) → kind `reject-sig`.
+- **Unsigned sheets are byte-for-byte v0.2.0**: they never examine `sig` (and a v0.3.0 unsigned sheet will happily receive signed diffs — the overlay does not break identity).
 
 ## What v0.2.0 proved with it (ML in quilts)
 
 Neural replicas whose weight updates are numeric cells **merge to one byte-identical model state in all 24 merge orders**, and that state is semantically meaningful **iff replicas share one loss basin**: shared-init replicas averaging to a model *better than every contributor* (loss 0.0010465 vs worst 0.0010889), while independent-init averaging fails honestly (merged loss 0.3614 vs per-replica ~0.0068 — different basins, permutation symmetry). Both directions receipted. Full arc in [EXPERIMENT.md](EXPERIMENT.md).
 
-## Honest limitations (v0.2.0)
+## Honest limitations (v0.3.0)
 
 - The policy is **coarser than a full OR-Set**: removal is per-cell, not per-add-id. Per-add-id removal is a future contract.
 - No transport. Replicas exchange diffs in memory; wiring this to `LocalCellTransport`/MCP is the next lane.
-- No signatures. `author` is a claim, not a proof; DID-signed diffs (coasys's did:key pattern) are next.
+- **Ed25519 is not post-quantum** — a quantum adversary with recorded signatures and enough compute could forge authorship. Post-quantum DID signatures are a future contract.
+- **Key custody is out of scope**: no revocation, rotation, or recovery protocol. A compromised key is a compromised author until the sheet's allowlist is updated; a lost key is a lost identity. The allowlist (`signed: { authors }`) is the only admission control.
+- **Unsigned-sheet downgrade risk (documented, not hidden — NC5)**: an unsigned sheet cannot examine signatures at all, so it accepts any well-formed diff — including ones a signed sheet rejects (cross-key sigs, off-allowlist authors, stripped sigs). Signatures protect the sheets that enforce them; mixing signed and unsigned replicas in one neighbourhood means the neighbourhood is only as strong as its weakest sheet. Also note: a *v0.2.0 replica* (old code) rejects signed diffs outright, because its `verifyDiff` hashes the whole diff minus id — including `sig`. Upgraded-but-unsigned sheets accept them; old binaries reject them.
+- The did flavor is study-local (base32 of the raw key), not W3C-multibase interoperable (see Signed sheets).
 - No Quilt-engine integration yet — this is the convergence substrate, engine-shaped, not engine-wired.
 - P5's mean-of-weights semantics require shared-basin replicas (see EXPERIMENT.md); the substrate enforces determinism, not model alignment.
 

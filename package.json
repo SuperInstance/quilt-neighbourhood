@@ -1,7 +1,7 @@
 {
   "name": "@superinstance/quilt-neighbourhood",
-  "version": "0.2.0",
-  "description": "Diff-DAG convergence for Quilt sheets \u2014 replicas partition, diverge, and rejoin to one deterministic revision. v0.2.0 adds P5 numeric merge (canonical-order mean) and the trained-replica experiment: weight averaging is byte-exact and semantically valid within one loss basin.",
+  "version": "0.3.0",
+  "description": "Diff-DAG convergence for Quilt sheets \u2014 replicas partition, diverge, and rejoin to one deterministic revision. v0.2.0 adds P5 numeric merge (canonical-order mean) and the trained-replica experiment: weight averaging is byte-exact and semantically valid within one loss basin. v0.3.0 adds DID-signed diffs: Ed25519 signature over the diff id, did:key authorship, signed sheets reject unsigned or forged diffs with receipted rejections while revisions stay value-pure.",
   "type": "module",
   "main": "src/replica.mjs",
   "files": [
@@ -27,7 +27,10 @@
     "quilt",
     "cells",
     "convergence",
-    "receipts"
+    "receipts",
+    "did",
+    "ed25519",
+    "signatures"
   ],
   "license": "MIT",
   "engines": {

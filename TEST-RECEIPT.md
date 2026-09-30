@@ -36,3 +36,24 @@ Receipt three-elements: what was run, what came back, what counts as failure.
 ## Negative controls (v0.2.0 addition)
 
 - NC4 proves P5's order-independence is not luck: adversarial floats (0.1, 1/3, 1e-7, 2^53, −0.0, ...) merged through 120 shuffled orders yield one float64 bit pattern, and NaN is rejected at write time with a receipted rejection — the mean of garbage is never silently computed.
+
+---
+
+# TEST-RECEIPT — quilt-neighbourhood v0.3.0
+
+Receipt three-elements: what was run, what came back, what counts as failure.
+
+- **Run**: `node --test test/*.test.mjs` — Node v24.21.0, Linux container.
+- **Came back**: 20 tests, **20 pass / 0 fail / 0 skipped** (v0.2.0's 14 + S0–S4 + NC5), ~230ms wall. Re-run 5× consecutively: 20/20 every time (determinism discipline holds with per-run Ed25519 key material — every signed-test assertion is relational, no pinned key bytes, no Math.random).
+- **Counts as failure**: any of the v0.2.0 conditions, plus — a base32/did encoding that does not round-trip its key bytes (S0), signatures leaking into id/canonical bytes or revisions differing between a signed sheet and the unsigned re-run of the same values (S1), a value-flipped or cross-key-signed diff accepted or an un-receipted rejection in a signed sheet (S2), the NC5 downgrade asymmetry being *hidden* rather than stated, an allowlisted sheet admitting a validly-signed unknown did (S3), any field tamper surviving verification — in particular a self-consistent (id-recomputed) forgery with a stale signature, which only the signature can catch (S4).
+
+## Signature contract (run-verified)
+
+- `did = "did:key:z" + RFC4648 base32 (no padding, canonical zero tails) of the raw 32-byte ed25519 public key` — 52 chars; S0 pins the RFC §10 vectors ("foobar" → `MZXW6YTBOI`, …) and the did↔key round-trip. Study-local flavor; deliberately not W3C-multibase (base58btc + `0xed 0x01` prefix) — documented in README.
+- `sig = base64(Ed25519_sign(sha256_digest_bytes(canonical(diff-without-sig))))` — equivalently, **the signature covers the 32-byte diff-id buffer**. `sig` is an overlay excluded from id/canonical computation (diff.mjs strips it; canonical.mjs untouched): S1 shows `makeDiff` over the same payload with or without `sig` yields identical ids and identical revisions. This is the decision of record: **sigs never enter identity, revisions stay value-pure**.
+- Receipt taxonomy: tampered payload → `reject` (id gate, v0.2.0 semantics, S2A/S4); intact payload with missing/malformed/cross-key sig or off-allowlist author → `reject-sig` (S2B/NC5/S3/S4 stale-sig case). The stale-sig self-consistent forgery is the load-bearing negative control: the content hash alone would accept it; the signature is what rejects it.
+- The v0.2.0 suite is untouched and green: unsigned sheets keep v0.2.0 behavior exactly (they never examine `sig`).
+
+## Experiment receipts (re-reproduction under v0.3.0)
+
+- Both v0.2.0 experiments re-run untouched (`node experiment/train_replicas.mjs`, `node experiment/train_replicas_sharedinit.mjs`): identical claims re-verified (24/24 merge orders → 1 distinct state/revision; phase-1 semantic fail and phase-2 bound-hold reproduce with identical numbers). Regenerated receipt JSONs diff against the committed v0.2.0 receipts **only in `timestamps.started/finished`** — the signature layer changed no experiment byte.
