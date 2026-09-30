@@ -1,0 +1,21 @@
+{
+  "name": "@superinstance/quilt-neighbourhood",
+  "version": "0.1.0",
+  "description": "Diff-DAG convergence for Quilt sheets — a neighbourhood of replicas that partition, diverge, and rejoin to one deterministic revision. Inspired by coasys AD4M's PerspectiveDiff contract, rebuilt in SuperInstance's cell-receipt idiom.",
+  "type": "module",
+  "main": "src/replica.mjs",
+  "files": ["src/", "README.md", "TEST-RECEIPT.md"],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SuperInstance/quilt-neighbourhood.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "keywords": ["crdt", "diff-dag", "quilt", "cells", "convergence", "receipts"],
+  "license": "MIT",
+  "engines": { "node": ">=18" }
+}

@@ -1,0 +1,19 @@
+name: test-and-publish
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  release:
+    types: [published]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --test test/*.test.mjs
+      - name: receipt
+        run: echo "suite green on $(git rev-parse --short HEAD)"
