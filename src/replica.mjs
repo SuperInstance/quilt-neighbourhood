@@ -91,6 +91,23 @@ export function hasNonFinite(v) {
   return false;
 }
 
+// maxDeltaNumeric(cur, next): the P7 gate's distance. Numbers -> |cur-next|;
+// equal-shape arrays -> max element-wise |cur-next|; shape/type mismatch -> null
+// (always emit — an incompatible write is a real change, never skippable).
+function maxDeltaNumeric(cur, next) {
+  if (typeof cur === "number" && typeof next === "number") return Math.abs(next - cur);
+  if (Array.isArray(cur) && Array.isArray(next) && cur.length === next.length) {
+    let m = 0;
+    for (let i = 0; i < cur.length; i++) {
+      if (typeof cur[i] !== "number" || typeof next[i] !== "number") return null;
+      const d = Math.abs(next[i] - cur[i]);
+      if (d > m) m = d;
+    }
+    return m;
+  }
+  return null;
+}
+
 // canonicalMean(values): the P5 reduction. `values` MUST already be in canonical
 // order (lexicographic diff id of the contributors). acc starts at 0; each element
 // is added in order; one division by n at the end. Same operand order => same
@@ -114,9 +131,17 @@ export class Replica {
   //   v0.3.0 style: { schema: { numeric: [...], signed: true | { authors: [did...] } } }
   // numeric: cell names registered as numeric (P5 applies). Entries are exact cell
   //   names ("b2:0") or prefix globs ending in "*" ("W0:*").
-  // signed: DID-signature policy (P6). true = every accepted diff must carry a valid
+  // signed: DID-signature policy. true = every accepted diff must carry a valid
   //   signature; { authors } = and its author did must be on the allowlist;
   //   false/undefined = v0.2.0 behavior, signatures are never examined.
+  // epsilon (P7, v0.4.0): epsilon-diff policy for numeric cells. A set() whose
+  //   value is within epsilon (per element) of the replica's CURRENT DAG value
+  //   emits NO diff — the write is sealed as a receipted "skip-eps" (no silent
+  //   drops) and set() returns null. THE P7 INVARIANT: after every set(), the
+  //   DAG value is within epsilon (per element) of the most recently written
+  //   value — so the merged state is a bounded approximation of the exact one
+  //   (|merged_P7 - merged_exact| <= epsilon per element whenever every
+  //   contributor has written since its last sync). 0/undefined = exact (v0.3.0).
   constructor(name, sheet = "default", opts = {}) {
     this.name = name;
     this.sheet = sheet;
@@ -126,6 +151,7 @@ export class Replica {
       p.endsWith("*") ? { prefix: p.slice(0, -1) } : { exact: p }
     );
     this._signed = schema.signed ?? opts.signed ?? false;
+    this._epsilon = schema.epsilon ?? opts.epsilon ?? 0;
     this.diffs = new Map(); // id -> diff
     this.heads = new Set(); // diff ids with no known children
     this.receipts = [];
@@ -184,6 +210,19 @@ export class Replica {
     const o = typeof opts === "string" ? { author: opts } : opts;
     if (this.isNumeric(cell)) this._checkNumericWrite(cell, value);
     const signer = this._localSigner(o, cell);
+    // P7 epsilon-diff gate (numeric cells only; runs AFTER the signed gate so a
+    // signed sheet still demands its key even when the write ends up skipped).
+    const eps = o.epsilon ?? this._epsilon ?? 0;
+    if (this.isNumeric(cell) && eps > 0) {
+      const cur = this.valueAt(cell);
+      if (cur !== undefined) {
+        const maxDelta = maxDeltaNumeric(cur, value);
+        if (maxDelta !== null && maxDelta <= eps) {
+          this._seal("skip-eps", { cell, maxDelta, epsilon: eps });
+          return null; // no diff: the P7 invariant pins |cur - value| <= eps
+        }
+      }
+    }
     const parents = this._headIds();
     const d = makeDiff({
       sheet: this.sheet, cell, op: OP.SET, value, prev: this.valueAt(cell),

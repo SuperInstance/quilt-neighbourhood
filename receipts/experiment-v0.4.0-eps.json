@@ -1,0 +1,101 @@
+{
+  "experiment": "quilt-neighbourhood v0.4.0 P7 epsilon-diff federated checkpoints",
+  "claims": {
+    "X1": "|merged_eps - merged_exact| <= 0.0001 per element (measured max 0.000020378113361307904 on b1:4)",
+    "X2": "|loss_eps - loss_exact| <= 0.01 (measured 1.445576496678612e-8)",
+    "X3": "eps DAG merge-order independent: 24/24 orders -> 1 revision, byte-identical state",
+    "X4": "writes - emits == skip-eps receipts on every replica; chains verify"
+  },
+  "config": {
+    "dataSeed": 20260930,
+    "sharedInit": 20260930,
+    "shuffleSeeds": {
+      "r1": 11,
+      "r2": 22,
+      "r3": 33,
+      "r4": 44
+    },
+    "steps": 300,
+    "checkpointEvery": 50,
+    "batch": 8,
+    "lr": 0.08,
+    "epsilon": 0.0001,
+    "cells": 26
+  },
+  "sparsity": {
+    "potentialWrites": 624,
+    "emitted": 517,
+    "skipped": 107,
+    "skipRatio": 0.171474,
+    "perCheckpoint": [
+      {
+        "checkpoint": 50,
+        "emitted": 0,
+        "potential": 104
+      },
+      {
+        "checkpoint": 100,
+        "emitted": 104,
+        "potential": 208
+      },
+      {
+        "checkpoint": 150,
+        "emitted": 208,
+        "potential": 312
+      },
+      {
+        "checkpoint": 200,
+        "emitted": 312,
+        "potential": 416
+      },
+      {
+        "checkpoint": 250,
+        "emitted": 415,
+        "potential": 520
+      },
+      {
+        "checkpoint": 300,
+        "emitted": 517,
+        "potential": 624
+      }
+    ],
+    "exactPotential": 624,
+    "exactEmitted": 624
+  },
+  "losses": {
+    "genesisBaseline": 0.4429522728965792,
+    "perReplicaFinal": {
+      "r1": 0.0018885948852768166,
+      "r2": 0.0018595139341742934,
+      "r3": 0.001844822670145062,
+      "r4": 0.001873619821135093
+    },
+    "mergedEps": 0.001858763962918307,
+    "mergedExact": 0.0018587784186832738,
+    "absDiff": 1.445576496678612e-8,
+    "band": 0.01
+  },
+  "bound": {
+    "maxElementError": 0.000020378113361307904,
+    "worstCell": "b1:4",
+    "epsilon": 0.0001,
+    "held": true
+  },
+  "mergeOrders": {
+    "tested": 24,
+    "distinctRevisions": 1,
+    "revision": "e955a4c69168fa74357b4247e4eb70b4b4a27994947e76fce61e77a6367a96d3",
+    "stateSha256": "7900b5daf5698d02d4504c2e27ed85738ff25b747e0edbed32dd085bf64c0289"
+  },
+  "tests": {
+    "tests": 22,
+    "pass": 22,
+    "fail": 0,
+    "exitCode": 0
+  },
+  "node": "v24.21.0",
+  "timestamps": {
+    "started": "2026-09-30T17:57:09.889Z",
+    "finished": "2026-09-30T17:57:11.376Z"
+  }
+}

@@ -57,3 +57,13 @@ Receipt three-elements: what was run, what came back, what counts as failure.
 ## Experiment receipts (re-reproduction under v0.3.0)
 
 - Both v0.2.0 experiments re-run untouched (`node experiment/train_replicas.mjs`, `node experiment/train_replicas_sharedinit.mjs`): identical claims re-verified (24/24 merge orders → 1 distinct state/revision; phase-1 semantic fail and phase-2 bound-hold reproduce with identical numbers). Regenerated receipt JSONs diff against the committed v0.2.0 receipts **only in `timestamps.started/finished`** — the signature layer changed no experiment byte.
+
+---
+
+# TEST-RECEIPT — quilt-neighbourhood v0.4.0 (P7 epsilon-diff)
+
+Receipt three-elements: what was run, what came back, what counts as failure.
+
+- **Run**: `node --test test/*.test.mjs` — Node v24.21.0. **Came back**: 28 tests, **28 pass / 0 fail / 0 skipped** (v0.3.0's 20 + E1–E7 + NC6).
+- **Counts as failure** (P7 additions): a below-epsilon write emitting a diff, or an above-epsilon write skipped (E1); violation of the bounded-error invariant |merged_eps − merged_exact| ≤ epsilon per element (E2); skip decisions making merges order-dependent (E3); a skipped write contributing to a P5 mean or the mean running over non-emitted values (E4); exact mode skipping anything (E5); array cells not element-wise (E6); a shape/type-incompatible write silently skipped (E7); writes − emits ≠ skip-eps receipts on any replica (NC6 — no silent drops).
+- **Experiment of record** (`node experiment/train_replicas_eps.mjs` → `receipts/experiment-v0.4.0-eps.json`): checkpoint federated averaging (4 shared-basin replicas, 300 steps, checkpoints every 50) at ε=1e-4 — **X1 HELD** (max element error 2.0378e-5 ≤ 1e-4, worst cell b1:4), **X2 HELD** (|loss_eps − loss_exact| = 1.4456e-8 ≤ 0.01 band), **X3 HELD** (24/24 orders → 1 revision, byte-identical state), **X4 HELD** (writes 624 − emits 517 = 107 skip receipts exactly; chains verify). Sparsity 17.1% at ε=1e-4 (checkpoint cadence bounds per-episode drift; larger ε trades bound for sparsity — receipted, not swept).

@@ -15,6 +15,7 @@
   - `P4` remove/remove → idempotent tombstone
   - `P5` concurrent sets on a **numeric** cell → **mean of contributors, summed in canonical order** (lexicographic diff-id order — the contributor *set* determines the sum order, so the result is byte-identical in every merge order). Mixed numeric/non-numeric contributors fall back to P3; removes still win via P2; a causally-later set after a P5 merge is a plain set. NaN/±Infinity are rejected at cell-write time with a receipted rejection.
   - `P6` **signed sheet** (v0.3.0): every accepted diff must carry a valid **Ed25519 signature over its 32-byte diff id**, verifiable under the public key embedded in the author's did; `signed: { authors: [...] }` additionally pins an author allowlist. Unsigned or badly-signed diffs are rejected with the dedicated receipt kind `reject-sig`.
+  - `P7` **epsilon-diff** (v0.4.0): a numeric `set()` whose value is within epsilon (per element) of the replica's current DAG value emits **no diff** — the write is sealed as a receipted `skip-eps` (never silent) and `set()` returns null. THE P7 INVARIANT: after every write, the DAG value is within epsilon of the most recently written value, so the merged state is a **bounded approximation** of the exact-communication state (|merged_eps − merged_exact| ≤ epsilon per element). Shape/type-incompatible writes always emit. `epsilon: 0` is exact v0.3.0 behavior.
 - **Receipt chain** — every state change (accept or reject) is sealed: `{seq, kind, payload_sha, prev_sha, sha}`. Flip any entry anywhere and `verifyReceipts()` fails. The chain is the honesty surface.
 
 ## What counts as failure
@@ -67,6 +68,10 @@ merge(otherReplica, sheet);                         // every accepted diff's sig
 - **Why the sig has teeth**: a tampered-AND-id-recomputed forgery passes the content-hash check (self-consistent) but fails the signature check — only someone holding the author's key can make a (payload, id) pair whose id's signature verifies (S4 pins this).
 - **Receipt taxonomy**: identity broken (tampered payload/stale id) → kind `reject` (v0.2.0 semantics, NC1); identity intact but authorship unproven (missing/malformed sig, unparseable did, sig that does not verify, author off the allowlist) → kind `reject-sig`.
 - **Unsigned sheets are byte-for-byte v0.2.0**: they never examine `sig` (and a v0.3.0 unsigned sheet will happily receive signed diffs — the overlay does not break identity).
+
+## What v0.4.0 added (P7: sparse federated training)
+
+Checkpoint federated averaging with ε=1e-4: 624 potential cell-writes → 517 emitted (17.1% skipped, every skip receipted), while the merged model stayed a *bounded* approximation of the exact-communication merged model — max element error 2.04e-5 (≤ ε), loss difference 1.45e-8, 24/24 merge orders byte-identical. Communication-efficient FL with a proof-shaped bound, in the diff-DAG idiom. Receipts: `receipts/experiment-v0.4.0-eps.json`.
 
 ## What v0.2.0 proved with it (ML in quilts)
 
