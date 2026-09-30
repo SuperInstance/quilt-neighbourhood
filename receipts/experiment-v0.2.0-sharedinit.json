@@ -1,0 +1,59 @@
+{
+  "experiment": "quilt-neighbourhood v0.2.0 phase-2 positive control: shared-basin replicas",
+  "theory": "weight averaging is meaningful ONLY within one loss basin — replicas sharing the genesis init and diverging only through data order",
+  "preRegisteredBound": {
+    "formula": "merged_loss <= worst_replica_loss * 1.5",
+    "factor": 1.5
+  },
+  "seeds": {
+    "data": 20260930,
+    "sharedInit": 20260930,
+    "shuffle": {
+      "r1": 11,
+      "r2": 22,
+      "r3": 33,
+      "r4": 44
+    }
+  },
+  "steps": 300,
+  "batchSize": 8,
+  "learningRate": 0.08,
+  "architecture": "mlp 1-6-6-1, tanh/tanh/linear, manual mini-batch SGD",
+  "genesisBaselineLoss": 0.4429522728965792,
+  "perReplicaFinalLoss": {
+    "r1": 0.0010667541670748317,
+    "r2": 0.001059974842081114,
+    "r3": 0.0010888897737910393,
+    "r4": 0.00105205222110317
+  },
+  "worstReplicaLoss": 0.0010888897737910393,
+  "meanOfPerReplicaLosses": 0.0010669177510125387,
+  "mergedLoss": 0.0010465479017071815,
+  "bound": 0.001633334660686559,
+  "semanticClaim": "HELD",
+  "mergeOrders": {
+    "tested": 24,
+    "distinctStateBytes": 1,
+    "distinctFloat64Bits": 1,
+    "distinctRevisions": 1,
+    "revision": "97d1f93dde6d2ca7982dfda3b01c01c0fe6c5e616af1a8a7c833f70440036cb5",
+    "stateSha256": "7afd8c85d8d23e5793bb75740d95555cc2c54a90b4ed53b9e85753f2c7a719da"
+  },
+  "referenceParity": {
+    "cellsChecked": 26,
+    "mismatches": 0,
+    "contributorsPerCell": 4
+  },
+  "coordinatorReceiptChainsVerified": true,
+  "tests": {
+    "tests": 14,
+    "pass": 14,
+    "fail": 0,
+    "exitCode": 0
+  },
+  "node": "v24.21.0",
+  "timestamps": {
+    "started": "2026-09-30T15:43:34.972Z",
+    "finished": "2026-09-30T15:43:35.489Z"
+  }
+}
