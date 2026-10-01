@@ -9,8 +9,8 @@
 - **CellDiff** — `{sheet, cell, op: set|remove, value, prev, author, ts, parents[]}`. `parents` are the diff ids the author had seen: the log is a DAG, divergence is structural, and a merge needs no coordinator. `id = sha256(canonical(diff))` — identity is content, tampering is self-evident.
 - **Revision** — `sha256(sorted head ids)`. Two replicas agree on the neighbourhood iff their revision bytes agree.
 - **Registered merge policy** (deterministic, a pure function of the DAG):
-  - `P1` set causally after a tombstone → resurrect
-  - `P2` set concurrent with a tombstone → **remove wins** (`REMOVE_WINS_CONCURRENT`)
+  - `P1` set causally after **all** live tombstones → resurrect
+  - `P2` set concurrent with **any** tombstone → **remove wins** (`REMOVE_WINS_CONCURRENT`)
   - `P3` concurrent sets → lexicographically smaller diff id wins
   - `P4` remove/remove → idempotent tombstone
   - `P5` concurrent sets on a **numeric** cell → **mean of contributors, summed in canonical order** (lexicographic diff-id order — the contributor *set* determines the sum order, so the result is byte-identical in every merge order). Mixed numeric/non-numeric contributors fall back to P3; removes still win via P2; a causally-later set after a P5 merge is a plain set. NaN/±Infinity are rejected at cell-write time with a receipted rejection.
@@ -38,6 +38,11 @@ The suite (`node --test test/`) states its own failure conditions:
 | NC2 | receipt tamper detected (head and tail) | chain lies |
 | NC3 | merge is monotone (knowledge never shrinks) | re-merge loses anything |
 | NC4 | adversarial floats (0.1, 1/3, 1e-7, 2^53, −0.0) converge through 120 shuffled orders; NaN rejected at write | any order-dependent bit pattern; NaN accepted |
+| TH1 | [set, remove, set]: the post-tombstone write chains onto the delete (child, not sibling) and resurrects | the wave-71 bug: P2 burying a causally-after resurrect |
+| TH2 | NC: a set emitted as a true SIBLING of the tombstone stays buried (P2 working) | the burial failing = concurrent writes surviving deletes |
+| TH3/TH4 | with two concurrent tombstones, a set dominating one anchor while concurrent with the other stays buried, in both id orders | resurrection by id luck (pre-fix fold behavior) |
+| TH5 | a set chaining through a tombstone CHAIN (delete-after-delete) resurrects | over-burial: anchor tracking killing causal writes |
+| TH6 | the TH3 DAG folded in reversed arrival order gives identical state | arrival order mattering |
 | S0 | base32 is RFC 4648-exact (no padding, canonical tails); the did embeds the exact public key | a did that does not round-trip its key |
 | S1 | two signers merge into a signed sheet; sigs verify; revision equals the unsigned re-run of the same values | sig entering id/canonical; revision drifting with signatures |
 | S2 | value-flipped and cross-key-signed diffs rejected with receipts in a signed sheet | forgery accepted; un-receipted rejection |
@@ -76,6 +81,13 @@ Checkpoint federated averaging with ε=1e-4: 624 potential cell-writes → 517 e
 ## What v0.2.0 proved with it (ML in quilts)
 
 Neural replicas whose weight updates are numeric cells **merge to one byte-identical model state in all 24 merge orders**, and that state is semantically meaningful **iff replicas share one loss basin**: shared-init replicas averaging to a model *better than every contributor* (loss 0.0010465 vs worst 0.0010889), while independent-init averaging fails honestly (merged loss 0.3614 vs per-replica ~0.0068 — different basins, permutation symmetry). Both directions receipted. Full arc in [EXPERIMENT.md](EXPERIMENT.md).
+
+## Tombstone-head invariant + RFC P8 (v0.4.1)
+
+Wave-71 replayed three real git histories (766 commits, 37,523 diffs) through a CellDiff DAG fold and surfaced two tool-semantics findings, both now contract:
+
+- **Removes are first-class heads (v0.4.1 fix, `src/replica.mjs` `state()`).** Every delete event updates the fold's per-cell causality anchors — the live tombstone set — including a delete landing on a cell that is already a tombstone. A set resurrects only by dominating **all** live tombstones; dominating one while concurrent with another is P2. A fold that anchors on a single tombstone (or ignores deletes) makes post-tombstone writes concurrent siblings of their tombstone and buries legitimate resurrects — 905 seen in the animal-ai replay before the wave-71 fix. Guarded by TH1–TH6.
+- **Git merges are reconciliation events (RFC [P8](RFC-P8-reconciliation-events.md), draft).** A merge commit's tree can differ from **both** parents (criss-cross content — e.g. animal-ai merge `0ec71be`: blob `19d3b98e` differs from both `dc1306c5` and `91320f61`, holding each side's contribution), so it is **not derivable from the diff streams**. P8 specs the event: `parents: [both branch heads]`, `asserted_tree`, one rec-diff per differing cell per parent (asserted against BOTH parents). It is an emission-layer event, not a sixth conflict policy — rec-diffs are causally after both heads, so the existing P1–P5 fold applies them unchanged. Seed of record: 45 merges → 13,062 rec-diffs, replay converged 1,017 == 1,017 on git HEAD.
 
 ## Honest limitations (v0.3.0)
 

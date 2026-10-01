@@ -1,8 +1,8 @@
 // replica.mjs — a neighbourhood member: one quilt sheet replica with a diff-DAG memory.
 //
 // MERGE POLICY (registered, deterministic, pure function of the DAG):
-//   P1  set vs tombstone, causally after   -> resurrect (value applies)
-//   P2  set vs tombstone, concurrent       -> REMOVE WINS  (REMOVE_WINS_CONCURRENT)
+//   P1  set causally after ALL live tombstones -> resurrect (value applies)
+//   P2  set concurrent with ANY tombstone  -> REMOVE WINS  (REMOVE_WINS_CONCURRENT)
 //   P3  set vs set, concurrent             -> lexicographically smaller diff id wins
 //   P4  remove vs remove, any relation     -> tombstone (idempotent)
 //   P5  set vs set, concurrent, cell REGISTERED NUMERIC in the sheet schema
@@ -30,10 +30,20 @@
 //       length, or non-finite elements), the group falls back to P3: the member with
 //       the lexicographically smallest id wins. Same fallback if the cell is not
 //       registered numeric at all (then the fold never forms a group).
-//   Guards (receipted): a numeric-cell write of NaN / ±Infinity is rejected at write
-//   time with a reject receipt; receiving such a diff is rejected with a receipt.
 //   Non-number values on a numeric cell are accepted into the DAG (authors may run
 //   divergent schemas) and simply trigger the P3 fallback at merge time.
+//   Guards (receipted): a numeric-cell write of NaN / ±Infinity is rejected at write
+//   time with a reject receipt; receiving such a diff is rejected with a receipt.
+//
+// TOMBSTONE-HEAD INVARIANT (v0.4.1, wave-72 regression for the wave-71 git-replay
+// finding "removes are first-class heads"): EVERY delete event updates the fold's
+// per-cell causality anchors — the live tombstone set — including a delete that
+// lands on a cell that is already a tombstone. A later set resurrects only by
+// dominating ALL live tombstones; dominating one anchor while staying concurrent
+// with another is P2 (remove wins). A fold that anchors on a single tombstone —
+// or that ignores deletes outright — makes post-tombstone writes concurrent
+// siblings of their tombstone and buries legitimate resurrects (905 seen in the
+// animal-ai replay before the wave-71 fix). Guarded by TH1–TH6.
 //
 // P6 (v0.3.0 — signed sheets, DID-signed diffs; see signed.mjs):
 //   A replica registered `signed: true` accepts a remote diff ONLY if it carries a
@@ -351,15 +361,20 @@ export class Replica {
   }
 
   state() {
-    const cellState = new Map(); // cell -> {kind:'value'|'group'|TOMBSTONE, ...}
+    const cellState = new Map(); // cell -> {kind:'value'|'group'|TOMBSTONE, ...}; a TOMBSTONE carries `tombs`: the live set of remove-diff ids (the cell's causality anchors)
     for (const id of this._topo()) {
       const d = this.diffs.get(id);
       const cur = cellState.get(d.cell);
       if (d.op === OP.SET) {
         if (!cur) { cellState.set(d.cell, { kind: "value", by: id, value: d.value }); continue; }
         if (cur.kind === TOMBSTONE) {
-          // P1/P2: resurrect only if the tombstone is an ancestor (causally before)
-          if (this.ancestors(id).has(cur.by)) cellState.set(d.cell, { kind: "value", by: id, value: d.value });
+          // P1/P2 (tombstone-head invariant): resurrect only if the set dominates
+          // EVERY live tombstone anchor on the cell. Dominating one anchor while
+          // concurrent with another is P2 — remove wins (TH3/TH4).
+          const anc = this.ancestors(id);
+          let dominates = true;
+          for (const t of cur.tombs) if (!anc.has(t)) { dominates = false; break; }
+          if (dominates) cellState.set(d.cell, { kind: "value", by: id, value: d.value });
           // else P2: remove wins, keep tombstone
           continue;
         }
@@ -389,12 +404,16 @@ export class Replica {
           cellState.set(d.cell, { kind: "value", by: id, value: d.value });
         }
       } else {
-        // REMOVE — collapses values AND pending groups alike:
+        // REMOVE — a FIRST-CLASS HEAD of the cell (tombstone-head invariant): the
+        // delete event updates the cell's causality anchors even when the cell is
+        // already a tombstone (a delete-on-delete still joins the live tombstone
+        // set — P4 stays idempotent in STATE, but the anchor is not left stale).
+        // Collapses values AND pending groups alike:
         //   causally after the current winner -> normal delete;
         //   concurrent with it (or with any group member) -> P2 remove wins.
-        if (!cur) { cellState.set(d.cell, { kind: TOMBSTONE, by: id }); continue; }
-        if (cur.kind === TOMBSTONE) continue; // P4 idempotent
-        cellState.set(d.cell, { kind: TOMBSTONE, by: id });
+        if (!cur) { cellState.set(d.cell, { kind: TOMBSTONE, tombs: new Set([id]) }); continue; }
+        if (cur.kind === TOMBSTONE) { cur.tombs.add(id); continue; } // P4 idempotent
+        cellState.set(d.cell, { kind: TOMBSTONE, tombs: new Set([id]) });
       }
     }
     const out = {};
