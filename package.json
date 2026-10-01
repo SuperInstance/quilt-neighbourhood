@@ -1,6 +1,6 @@
 {
   "name": "@superinstance/quilt-neighbourhood",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Diff-DAG convergence for Quilt sheets \u2014 replicas partition, diverge, and rejoin to one deterministic revision. v0.4.0 adds P7 epsilon-diff (bounded-approximation sparse emission for numeric cells: receipted skips, |merged_eps - merged_exact| <= epsilon per element).",
   "type": "module",
   "main": "src/replica.mjs",

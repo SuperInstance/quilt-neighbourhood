@@ -89,6 +89,22 @@ Wave-71 replayed three real git histories (766 commits, 37,523 diffs) through a 
 - **Removes are first-class heads (v0.4.1 fix, `src/replica.mjs` `state()`).** Every delete event updates the fold's per-cell causality anchors — the live tombstone set — including a delete landing on a cell that is already a tombstone. A set resurrects only by dominating **all** live tombstones; dominating one while concurrent with another is P2. A fold that anchors on a single tombstone (or ignores deletes) makes post-tombstone writes concurrent siblings of their tombstone and buries legitimate resurrects — 905 seen in the animal-ai replay before the wave-71 fix. Guarded by TH1–TH6.
 - **Git merges are reconciliation events (RFC [P8](RFC-P8-reconciliation-events.md), draft).** A merge commit's tree can differ from **both** parents (criss-cross content — e.g. animal-ai merge `0ec71be`: blob `19d3b98e` differs from both `dc1306c5` and `91320f61`, holding each side's contribution), so it is **not derivable from the diff streams**. P8 specs the event: `parents: [both branch heads]`, `asserted_tree`, one rec-diff per differing cell per parent (asserted against BOTH parents). It is an emission-layer event, not a sixth conflict policy — rec-diffs are causally after both heads, so the existing P1–P5 fold applies them unchanged. Seed of record: 45 merges → 13,062 rec-diffs, replay converged 1,017 == 1,017 on git HEAD.
 
+## Reconciliation events (v0.5.0) — P8 implemented
+
+RFC P8 is now code: `src/reconciliation.mjs` (event schema, identity gate,
+deterministic rec-diff emission) + `Replica.applyReconciliation` (fail-closed
+application). A criss-cross merge result — content matching NEITHER parent —
+travels as a first-class DAG event: marker rep(R) parented on BOTH branch heads,
+plus rec-diffs (one per differing cell per parent) that apply through the
+UNCHANGED P1-P5 fold. Application is fail-closed: tampered events fail the id
+gate, unknown parents refuse (partial knowledge is not applicable), signed
+sheets refuse unsigned rec-diffs (P6 interplay stays an open question, Q2),
+and the fold must land exactly on the asserted tree or nothing applies.
+Re-application of a known event is a no-op; emission is deterministic
+(identical marker id on independent replicas). Guarded by R1-R5 in
+`test/reconciliation.test.mjs`, including a seeded 50-iteration random-history
+replay property (both sides + shuffled witness converge on the asserted tree).
+
 ## Honest limitations (v0.3.0)
 
 - The policy is **coarser than a full OR-Set**: removal is per-cell, not per-add-id. Per-add-id removal is a future contract.

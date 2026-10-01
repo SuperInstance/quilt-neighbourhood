@@ -69,6 +69,7 @@
 import { makeDiff, verifyDiff, OP, GENESIS } from "./diff.mjs";
 import { canonicalize, sha256 } from "./canonical.mjs";
 import { didFromPrivateKey, signDiff, verifyDiffForSheet } from "./signed.mjs";
+import { ABSENT, deriveRecDiffs, makeMarker, verifyReconciliationEvent } from "./reconciliation.mjs";
 
 const TOMBSTONE = Symbol("tombstone");
 
@@ -361,8 +362,16 @@ export class Replica {
   }
 
   state() {
+    return this._foldState(null);
+  }
+
+  // The fold itself: P1–P5 + tombstone-head, over the whole DAG (idFilter = null)
+  // or restricted to a subset of diff ids (stateAt). A pure function of the DAG —
+  // every replica that knows the same diffs folds to the same state bytes.
+  _foldState(idFilter) {
     const cellState = new Map(); // cell -> {kind:'value'|'group'|TOMBSTONE, ...}; a TOMBSTONE carries `tombs`: the live set of remove-diff ids (the cell's causality anchors)
     for (const id of this._topo()) {
+      if (idFilter && !idFilter.has(id)) continue;
       const d = this.diffs.get(id);
       const cur = cellState.get(d.cell);
       if (d.op === OP.SET) {
@@ -440,6 +449,138 @@ export class Replica {
   valueAt(cell) {
     const s = this.state()[cell];
     return s === undefined ? null : s;
+  }
+
+  // ---------- branch trees (P8) ----------
+  // stateAt(id): the fold restricted to diff `id` and its ancestors — "the state of
+  // the branch at head id". The same P1–P5 + tombstone-head fold, walked in the
+  // full DAG's topo order with non-member diffs skipped (ancestry is intrinsic, so
+  // dominance checks are identical).
+  stateAt(id) {
+    if (!this.diffs.has(id)) throw new Error(`stateAt: unknown diff ${id}`);
+    const keep = this.ancestors(id);
+    keep.add(id);
+    return this._foldState(keep);
+  }
+
+  // treeAt(id): stateAt(id) minus the bookkeeping namespace ("_"-prefixed cells) —
+  // the per-parent tree { cell -> value } that P8's rec-diff derivation diffs
+  // against (RFC P8 §2: tree(Hi)). A missing key means the cell does not exist on
+  // that side.
+  treeAt(id) {
+    const s = this.stateAt(id);
+    const out = {};
+    for (const [cell, v] of Object.entries(s)) if (!cell.startsWith("_")) out[cell] = v;
+    return out;
+  }
+
+  // The per-cell chain tails for `cell`: the diffs on the cell that no other diff
+  // on the same cell dominates (via a DIRECT same-cell parent edge — the emission
+  // protocol chains every diff on a cell onto its predecessor, so indirect
+  // domination cannot hide a tail here; over-counting a tail only ADDS parents to
+  // a rec-diff, which is the safe direction: more domination, never less).
+  // On emission-shaped DAGs this is exactly the emitter's lastOnCell(c).
+  _cellTails(cell, byCell) {
+    const ids = byCell.get(cell);
+    if (!ids) return [];
+    const dominated = new Set();
+    for (const id of ids)
+      for (const p of this.diffs.get(id).parents) {
+        const pd = p !== GENESIS && this.diffs.get(p);
+        if (pd && pd.cell === cell) dominated.add(p);
+      }
+    return ids.filter((id) => !dominated.has(id)).sort();
+  }
+
+  // ---------- P8: reconciliation events (v0.5.0) ----------
+  // Apply a reconciliation event (RFC P8): derive the event marker + one rec-diff
+  // per differing cell per parent (the §2 emission loop, anchors derived from THIS
+  // DAG's per-cell chain tails — byte-identical to the emitter's materialization
+  // on emission-shaped DAGs), absorb them, fold, and ASSERT the folded state
+  // against the event's asserted_tree. FAIL-CLOSED: any assertion mismatch rolls
+  // the DAG back to the pre-application state (diffs, heads, ancestry memo), seals
+  // a "reject-rec" receipt, and throws — nothing partially applies. Applying an
+  // event whose marker this replica already knows is a receipted no-op (the DAG
+  // gates re-application).
+  //
+  // opts.parentTrees: optional array aligned with event.parents — tree(Hi) per
+  // parent. OMITTED (default): the trees are DERIVED from the DAG via treeAt(head)
+  // — exact for DAGs where each branch head dominates its branch's content (every
+  // Replica-built DAG; the rep-chained git-replay shape must supply them, since
+  // there file diffs hang OFF the rep chain). A lying caller cannot forge a pass:
+  // the assertion checks the fold, not the trees.
+  applyReconciliation(event, opts = {}) {
+    const v = verifyReconciliationEvent(event);
+    if (!v.ok) {
+      this._seal("reject-rec", { event: event?.id ?? null, reason: v.reason });
+      throw new TypeError(`reconciliation event rejected: ${v.reason}`);
+    }
+    for (const p of event.parents) {
+      if (!this.diffs.has(p)) {
+        this._seal("reject-rec", { event: event.id, reason: `unknown parent ${p}` });
+        throw new Error(`reconciliation ${event.id.slice(0, 8)}: parent ${p.slice(0, 8)} unknown — partial knowledge is not applicable (the DAG gates application, RFC P8 §6 Q1)`);
+      }
+    }
+    if (this._signed) {
+      // P6 interplay is unspecified (RFC P8 §6 Q2): rec-diffs would need signatures
+      // this implementation does not produce — fail closed rather than silently
+      // accepting unsigned assertions into a signed sheet.
+      this._seal("reject-rec", { event: event.id, reason: "signed sheet: reconciliation application unspecified (RFC P8 §6 Q2)" });
+      throw new TypeError("signed sheet: applyReconciliation is unspecified (RFC P8 §6 Q2) and refuses to absorb unsigned rec-diffs");
+    }
+    const marker = makeMarker(event, this.sheet);
+    if (this.diffs.has(marker.id)) return { applied: false, reason: "known", marker };
+
+    let parentTrees = opts.parentTrees;
+    if (parentTrees === undefined) {
+      parentTrees = event.parents.map((p) => this.treeAt(p));
+    } else if (!Array.isArray(parentTrees) || parentTrees.length !== event.parents.length) {
+      throw new TypeError("opts.parentTrees must be an array aligned with event.parents (or omit it to derive trees from the DAG)");
+    }
+
+    // Per-cell chain tails of the KNOWN DAG, for the cells the event asserts.
+    const byCell = new Map();
+    for (const [id, d] of this.diffs) {
+      if (!byCell.has(d.cell)) byCell.set(d.cell, []);
+      byCell.get(d.cell).push(id);
+    }
+    const lastOnCell = new Map();
+    for (const cell of Object.keys(event.asserted_tree)) lastOnCell.set(cell, this._cellTails(cell, byCell));
+
+    const recDiffs = deriveRecDiffs({ sheet: this.sheet, event, markerId: marker.id, parentTrees, lastOnCell });
+
+    // Absorb -> fold -> assert; roll back entirely on mismatch (fail-closed).
+    const headsSnapshot = new Set(this.heads);
+    const added = [];
+    try {
+      this._absorb(marker);
+      added.push(marker.id);
+      for (const d of recDiffs) {
+        this._absorb(d);
+        added.push(d.id);
+      }
+      const st = this.state();
+      for (const [cell, a] of Object.entries(event.asserted_tree)) {
+        if (cell.startsWith("_")) continue; // never asserted (guarded at creation too)
+        const cur = st[cell];
+        if (a === ABSENT) {
+          if (cur !== undefined)
+            throw new Error(`reconciliation assertion failed: cell "${cell}" is live (${JSON.stringify(cur)}) but the event asserts ABSENT`);
+        } else if (cur === undefined || canonicalize(cur) !== canonicalize(a)) {
+          throw new Error(`reconciliation assertion failed: cell "${cell}" folds to ${JSON.stringify(cur ?? null)} but the event asserts ${JSON.stringify(a)}`);
+        }
+      }
+    } catch (e) {
+      for (const id of added) {
+        this.diffs.delete(id);
+        this._anc.delete(id); // ancestry memo entries created for the trial diffs
+      }
+      this.heads = headsSnapshot;
+      this._seal("reject-rec", { event: event.id, reason: e.message });
+      throw e;
+    }
+    this._seal("reconciliation", { event: event.id, marker: marker.id, recDiffs: recDiffs.length });
+    return { applied: true, event, marker, recDiffs, recDiffCount: recDiffs.length };
   }
 
   revision() {
