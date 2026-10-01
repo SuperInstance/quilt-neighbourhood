@@ -43,11 +43,31 @@
 // Application lives in Replica.applyReconciliation (replica.mjs) and is FAIL-CLOSED:
 // the fold must land exactly on the asserted tree, or nothing applies.
 //
+// v0.6.0 (P8 x P6 — DID-signed reconciliation events): the event schema gains an
+// optional `sig` OVERLAY (excluded from the id, exactly like a diff's sig) — an
+// Ed25519 signature over the 32-byte event-id buffer, verifiable under the public
+// key embedded in the author's did (the same primitives as signed diffs;
+// signed.mjs signId/verifySignatureOverId). FAIL-CLOSED AUTHORSHIP GATE: an event
+// whose author field is a did:key:z string MUST carry a signature that verifies
+// under that did, or applyReconciliation refuses — a did claims proof-of-authorship,
+// so a did-authored unsigned event is refused rather than trusted (R6b/R6c).
+// Events with a plain-string (non-did) author are untouched: they remain valid,
+// signature-free, byte-for-byte v0.5.0 (backward compatibility, R1/R2/R5).
+// The derived rec-diffs are NOT separately signed at application time: they are
+// deterministic derivatives of the signature-verified event and the receiving DAG
+// (their ids are a pure function of both), so the event signature is the
+// authorship proof for the whole materialization. Emitters holding the key can
+// additionally sign the materialized marker + rec-diffs (createReconciliation
+// privateKey option) so they survive the P6 receive gate of signed sheets in
+// transport; because sig is an identity-invisible overlay, those signed diffs have
+// the SAME ids as any applier's re-derivation.
+//
 // Cells whose name starts with "_" are the bookkeeping namespace (commit markers,
 // reconciliation markers): they never appear in asserted trees, parent trees
 // (Replica.treeAt filters them), or assertions.
 import { makeDiff, OP } from "./diff.mjs";
 import { canonicalize, sha256 } from "./canonical.mjs";
+import { DID_PREFIX, didFromPrivateKey, signDiff, signId, verifySignatureOverId } from "./signed.mjs";
 
 // ABSENT — the asserted_tree sentinel for "this cell is asserted NOT to exist".
 // A NUL byte cannot appear in a git path and JSON-encodes deterministically, so a
@@ -70,12 +90,15 @@ export function makeReconciliationEvent({ parents, assertedTree, author, ts }) {
 }
 
 // Identity gate for a received event (NC1 ethos): the id must be the canonical hash
-// of the event without it. Tampering with any field is self-evident.
+// of the event without it. Tampering with any field is self-evident. `sig` is an
+// OVERLAY (v0.6.0): excluded from identity, so signed and unsigned views of one
+// event share the id — stripping or re-signing never changes identity.
 export function verifyReconciliationEvent(event) {
   if (!event || typeof event !== "object") return { ok: false, reason: "not a reconciliation event" };
   if (event.type !== "reconciliation") return { ok: false, reason: "not a reconciliation event" };
   if (!event.id) return { ok: false, reason: "no id" };
-  const { id, ...rest } = event;
+  const { id, sig, ...rest } = event;
+  void sig;
   const expect = sha256(canonicalize(rest));
   if (expect !== id) return { ok: false, reason: `id mismatch: got ${id.slice(0, 12)} want ${expect.slice(0, 12)}` };
   if (!Array.isArray(event.parents) || event.parents.length < 2)
@@ -89,6 +112,57 @@ export function verifyReconciliationEvent(event) {
 // Bookkeeping cell of the event marker rep(R).
 export function markerCellFor(event) {
   return `_reconciliation/${event.id.slice(0, 8)}`;
+}
+
+// ---------- P8 x P6: DID-signed reconciliation events (v0.6.0) ----------
+
+// signReconciliationEvent(event, privateKey) -> a NEW event carrying `sig`.
+//   sig = base64(Ed25519 signature over the 32-byte event-id buffer) — the same
+//   attestation shape as a signed diff. Mirrors signDiff's guards: refuses if
+//   event.author is not exactly the signing key's did (authorship must BE the
+//   proof), if the event already carries a sig, or if the id does not match the
+//   payload. `sig` is an overlay: signing never changes the event id.
+export function signReconciliationEvent(event, privateKey) {
+  if (!event || typeof event !== "object" || !event.id)
+    throw new TypeError("signReconciliationEvent: event must be an object with an id");
+  const did = didFromPrivateKey(privateKey);
+  if (event.author !== did)
+    throw new Error(`signReconciliationEvent: event.author (${event.author}) is not the signing key's did (${did}) — set author = did, authorship must be the proof`);
+  if (event.sig !== undefined)
+    throw new Error("signReconciliationEvent: event already carries a sig — sign a fresh event, do not re-sign over an existing signature");
+  const v = verifyReconciliationEvent(event);
+  if (!v.ok)
+    throw new Error(`signReconciliationEvent: refusing to sign an event whose id does not match its payload (${v.reason})`);
+  return { ...event, sig: signId(event.id, privateKey) };
+}
+
+// verifySignedReconciliationEvent(event) -> { ok, reason } — full gate chain for a
+// signed event: sig present; id integrity (canonical(event-without-sig-and-id) hashes
+// to event.id — a self-consistent forgery with a STALE sig passes this and is caught
+// by the signature); author is a parseable did embedding a 32-byte Ed25519 key;
+// Ed25519 verify of the signature over the event-id bytes under that key.
+export function verifySignedReconciliationEvent(event) {
+  if (!event || typeof event !== "object") return { ok: false, reason: "not a reconciliation event" };
+  if (typeof event.sig !== "string" || event.sig.length === 0)
+    return { ok: false, reason: "missing sig — a did-authored reconciliation event must carry a signature over its event id (unsigned did-authorship refuses, fail-closed)" };
+  const iv = verifyReconciliationEvent(event);
+  if (!iv.ok) return { ok: false, reason: iv.reason };
+  return verifySignatureOverId(event.id, event.author, event.sig);
+}
+
+// verifyEventAuthorship(event) -> { ok, reason?, signed } — the FAIL-CLOSED
+// authorship gate applied by Replica.applyReconciliation: an event whose author is
+// a did:key:z string claims proof-of-authorship, so it MUST carry a signature that
+// verifies under that did (R6) — a did-authored unsigned event is refused, not
+// trusted (v0.2.0's "author is a claim" gap, closed for P8 in v0.6.0). Events with
+// a plain-string author pass untouched ({ signed: false }) — byte-for-byte v0.5.0
+// backward compatibility.
+export function verifyEventAuthorship(event) {
+  if (event && typeof event.author === "string" && event.author.startsWith(DID_PREFIX)) {
+    const v = verifySignedReconciliationEvent(event);
+    return v.ok ? { ok: true, signed: true } : v;
+  }
+  return { ok: true, signed: false };
 }
 
 // The event marker: an ordinary CellDiff whose parents are BOTH branch heads
@@ -173,16 +247,33 @@ export function deriveRecDiffs({ sheet, event, markerId, parentTrees, lastOnCell
 //                  to application time (Replica.applyReconciliation derives the
 //                  parent trees from the DAG or accepts opts.parentTrees).
 //   author, ts   : the resolver's identity and time (as in CellDiff; the author of
-//                  record is the resolver — RFC P8 §6 open question 2 stays open)
+//                  record is the resolver — if author is a did:key:z string the event
+//                  MUST be signed (pass privateKey) or no replica will apply it:
+//                  applyReconciliation's authorship gate refuses did-authored
+//                  unsigned events, fail-closed (v0.6.0)
+//   privateKey   : optional Ed25519 private key (node:crypto KeyObject). GIVEN:
+//                  author must equal the key's did and the returned event carries a
+//                  `sig` over its id; if parentTrees are also given, the materialized
+//                  marker + rec-diffs are signed too (they keep the same ids — sig is
+//                  an overlay — so they survive the P6 receive gate of signed sheets
+//                  in transport). OMITTED: unsigned event (fine for plain-string
+//                  authors; refused at application for did authors).
 //   sheet        : sheet name for the marker + rec-diffs
-export function createReconciliation({ parents, assertedTree, lastOnCell, parentTrees, author, ts, sheet = "default" }) {
-  const event = makeReconciliationEvent({ parents, assertedTree, author, ts });
+export function createReconciliation({ parents, assertedTree, lastOnCell, parentTrees, author, ts, sheet = "default", privateKey }) {
+  let event = makeReconciliationEvent({ parents, assertedTree, author, ts });
+  if (privateKey !== undefined) event = signReconciliationEvent(event, privateKey);
   const marker = makeMarker(event, sheet);
   let recDiffs = [];
   if (parentTrees !== undefined) {
     if (!Array.isArray(parentTrees) || parentTrees.length !== event.parents.length)
       throw new TypeError("parentTrees must be an array aligned with parents (tree(Hi) per parent) — omit it to defer rec-diff derivation to application time");
     recDiffs = deriveRecDiffs({ sheet, event, markerId: marker.id, parentTrees, lastOnCell });
+    if (privateKey !== undefined) {
+      // Transport-hardened materialization: same ids, plus per-diff signatures so a
+      // signed sheet's P6 receive gate accepts them. (signDiff re-checks author==did
+      // and id integrity per diff — defense in depth.)
+      return { event, marker: signDiff(marker, privateKey), recDiffs: recDiffs.map((d) => signDiff(d, privateKey)) };
+    }
   }
   return { event, marker, recDiffs };
 }

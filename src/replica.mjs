@@ -69,7 +69,7 @@
 import { makeDiff, verifyDiff, OP, GENESIS } from "./diff.mjs";
 import { canonicalize, sha256 } from "./canonical.mjs";
 import { didFromPrivateKey, signDiff, verifyDiffForSheet } from "./signed.mjs";
-import { ABSENT, deriveRecDiffs, makeMarker, verifyReconciliationEvent } from "./reconciliation.mjs";
+import { ABSENT, deriveRecDiffs, makeMarker, verifyEventAuthorship, verifyReconciliationEvent } from "./reconciliation.mjs";
 
 const TOMBSTONE = Symbol("tombstone");
 
@@ -492,7 +492,7 @@ export class Replica {
     return ids.filter((id) => !dominated.has(id)).sort();
   }
 
-  // ---------- P8: reconciliation events (v0.5.0) ----------
+  // ---------- P8: reconciliation events (v0.5.0; DID-signed in v0.6.0) ----------
   // Apply a reconciliation event (RFC P8): derive the event marker + one rec-diff
   // per differing cell per parent (the §2 emission loop, anchors derived from THIS
   // DAG's per-cell chain tails — byte-identical to the emitter's materialization
@@ -502,6 +502,20 @@ export class Replica {
   // a "reject-rec" receipt, and throws — nothing partially applies. Applying an
   // event whose marker this replica already knows is a receipted no-op (the DAG
   // gates re-application).
+  //
+  // Gates, in order (each receipted as "reject-rec" before anything applies):
+  //   1. event id integrity (verifyReconciliationEvent — cheapest, fires first);
+  //   2. AUTHORSHIP (v0.6.0, P8 x P6): if event.author is a did:key:z string it MUST
+  //      carry an Ed25519 signature over the event id that verifies under the did's
+  //      embedded public key — a did-authored unsigned event is REFUSED, not trusted
+  //      (R6b: stale-sig self-consistent forgery; R6c: wrong-key signature);
+  //   3. parents known — partial knowledge is not applicable (RFC P8 §6 Q1);
+  //   4. signed-sheet policy (P6): a signed sheet accepts ONLY did-signed events
+  //      (gate 2 passed); an unsigned event on a signed sheet still refuses
+  //      (fail-closed, the v0.5.0 Q2 stance) and an allowlist sheet additionally
+  //      pins event.author (mirroring verifyDiffForSheet's post-crypto allowlist).
+  //      Unsigned (policy-free) sheets apply did-signed and plain-author events
+  //      alike; plain-author events keep byte-for-byte v0.5.0 behavior.
   //
   // opts.parentTrees: optional array aligned with event.parents — tree(Hi) per
   // parent. OMITTED (default): the trees are DERIVED from the DAG via treeAt(head)
@@ -515,6 +529,11 @@ export class Replica {
       this._seal("reject-rec", { event: event?.id ?? null, reason: v.reason });
       throw new TypeError(`reconciliation event rejected: ${v.reason}`);
     }
+    const au = verifyEventAuthorship(event); // did author => signature MUST verify (fail-closed)
+    if (!au.ok) {
+      this._seal("reject-rec", { event: event.id, reason: `unproven authorship: ${au.reason}` });
+      throw new TypeError(`reconciliation ${event.id.slice(0, 8)} refused: ${au.reason}`);
+    }
     for (const p of event.parents) {
       if (!this.diffs.has(p)) {
         this._seal("reject-rec", { event: event.id, reason: `unknown parent ${p}` });
@@ -522,11 +541,16 @@ export class Replica {
       }
     }
     if (this._signed) {
-      // P6 interplay is unspecified (RFC P8 §6 Q2): rec-diffs would need signatures
-      // this implementation does not produce — fail closed rather than silently
-      // accepting unsigned assertions into a signed sheet.
-      this._seal("reject-rec", { event: event.id, reason: "signed sheet: reconciliation application unspecified (RFC P8 §6 Q2)" });
-      throw new TypeError("signed sheet: applyReconciliation is unspecified (RFC P8 §6 Q2) and refuses to absorb unsigned rec-diffs");
+      if (!au.signed) {
+        // P6 interplay (RFC P8 §6 Q2), resolved fail-closed in v0.6.0: a signed sheet
+        // accepts only DID-signed events; unsigned assertions never silently absorb.
+        this._seal("reject-rec", { event: event.id, reason: "signed sheet: reconciliation event is not DID-signed — refusing unsigned assertions (RFC P8 §6 Q2, fail-closed)" });
+        throw new TypeError("signed sheet: applyReconciliation requires a DID-signed event (valid signature over the event id by the author did) — unsigned events refuse");
+      }
+      if (typeof this._signed === "object" && Array.isArray(this._signed.authors) && !this._signed.authors.includes(event.author)) {
+        this._seal("reject-rec", { event: event.id, reason: `author ${event.author} is not in the sheet allowlist` });
+        throw new TypeError(`reconciliation author ${event.author} is not in the signed sheet's allowlist`);
+      }
     }
     const marker = makeMarker(event, this.sheet);
     if (this.diffs.has(marker.id)) return { applied: false, reason: "known", marker };
@@ -579,7 +603,7 @@ export class Replica {
       this._seal("reject-rec", { event: event.id, reason: e.message });
       throw e;
     }
-    this._seal("reconciliation", { event: event.id, marker: marker.id, recDiffs: recDiffs.length });
+    this._seal("reconciliation", { event: event.id, marker: marker.id, recDiffs: recDiffs.length, signed: au.signed });
     return { applied: true, event, marker, recDiffs, recDiffCount: recDiffs.length };
   }
 

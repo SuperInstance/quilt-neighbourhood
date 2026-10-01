@@ -105,6 +105,51 @@ Re-application of a known event is a no-op; emission is deterministic
 `test/reconciliation.test.mjs`, including a seeded 50-iteration random-history
 replay property (both sides + shuffled witness converge on the asserted tree).
 
+## DID-signed reconciliation events (v0.6.0) — P8 x P6, Q2 resolved
+
+The wave-73 seed asked for DID-signed rec-diffs; v0.6.0 delivers them at the
+event layer, reusing the v0.3.0 signed-diff primitives untouched (`signed.mjs`
+gains only `signId`/`verifySignatureOverId`, the id-attestation crypto core).
+
+- **Schema**: a reconciliation event may carry a `sig` — `base64(Ed25519_sign(32-byte
+  event-id buffer))` — exactly like a diff's sig. `sig` is an **overlay**: excluded
+  from identity (`verifyReconciliationEvent` strips it before hashing), so
+  `signReconciliationEvent` never changes the event id, and unsigned v0.5.0 events
+  verify byte-for-byte unchanged (backward compatible; R1/R2/R5 untouched).
+- **Semantics — fail-closed authorship gate**: an event whose `author` is a
+  `did:key:z` string **MUST** carry a signature that verifies under the did's
+  embedded public key, or `applyReconciliation` refuses (receipted `reject-rec`).
+  A did claims proof-of-authorship; a did-authored unsigned event is refused, not
+  trusted. Events with a plain-string author are untouched (valid, signature-free,
+  v0.5.0 behavior). Gate order: id integrity → authorship → parents-known →
+  sheet policy.
+- **Signed sheets (Q2 resolved)**: the v0.5.0 blanket refusal ("signed sheet:
+  reconciliation application unspecified") becomes precise. A signed sheet applies
+  a DID-signed event (the event signature is the authorship proof for the whole
+  materialization — the derived rec-diffs are deterministic derivatives of the
+  verified event and the receiving DAG, so their ids are bound to it); an unsigned
+  event on a signed sheet still refuses (R3 pins this); an allowlist sheet
+  (`signed: { authors }`) additionally pins `event.author`, after the crypto gate,
+  mirroring `verifyDiffForSheet`. The reconciliation receipt payload records
+  `signed: true/false`.
+- **Emitter-side signing**: `createReconciliation({ ..., privateKey })` signs the
+  event; when `parentTrees` are given it also signs the materialized marker +
+  rec-diffs (`signDiff`) so they survive the P6 receive gate of signed sheets in
+  transport — and because sig is identity-invisible, those signed diffs carry the
+  SAME ids as any applier's re-derivation (R6d: signed transport converges).
+- **Known limitation (stated, not hidden)**: an applier that re-derives rec-diffs
+  on a non-emission-shaped DAG produces different rec-diff ids than the emitter's
+  materialization; those are sibling assertions of the same values and fold to the
+  same state, but per-rec-diff signature continuity across arbitrary DAG shapes is
+  future work. The event-level signature is the root of trust.
+- **Tests**: R6 (valid signed events apply — unsigned sheets, signed sheets, and
+  the receipt's signed flag), R6b (naive tamper refuses at the id gate; the
+  stale-sig self-consistent forgery — tamper + recompute id, keep the old
+  signature — passes the id gate and is caught by the signature, S4-for-events),
+  R6c (a signature by the wrong key refuses), R6d (createReconciliation(privateKey)
+  signs event + marker + rec-diffs; off-allowlist resolver refuses; signed-sheet
+  transport converges). Suite: 42/42.
+
 ## Honest limitations (v0.3.0)
 
 - The policy is **coarser than a full OR-Set**: removal is per-cell, not per-add-id. Per-add-id removal is a future contract.

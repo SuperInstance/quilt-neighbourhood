@@ -1,7 +1,7 @@
 {
   "name": "@superinstance/quilt-neighbourhood",
-  "version": "0.5.0",
-  "description": "Diff-DAG convergence for Quilt sheets \u2014 replicas partition, diverge, and rejoin to one deterministic revision. v0.4.0 adds P7 epsilon-diff (bounded-approximation sparse emission for numeric cells: receipted skips, |merged_eps - merged_exact| <= epsilon per element).",
+  "version": "0.6.0",
+  "description": "Diff-DAG convergence for Quilt sheets \u2014 replicas partition, diverge, and rejoin to one deterministic revision. v0.6.0 adds DID-signed reconciliation events (P8 x P6): a did-authored event MUST carry a valid Ed25519 signature over its event id or applyReconciliation refuses; signed sheets accept DID-signed events (Q2 resolved); emitter-side createReconciliation(privateKey) signs event + marker + rec-diffs for signed transport.",
   "type": "module",
   "main": "src/replica.mjs",
   "files": [

@@ -127,6 +127,49 @@ export function publicKeyFromDid(did) {
   });
 }
 
+// ---------- id-signature primitives (shared with reconciliation events, v0.6.0) ----------
+// signId(idHex, privateKey) -> base64 Ed25519 signature over a 32-byte hex id buffer.
+// This is exactly what signDiff does for diffs (sig covers the diff id); v0.6.0 exposes
+// it so reconciliation events can carry the same attestation over their own id.
+export function signId(idHex, privateKey) {
+  const buf = Buffer.from(idHex, "hex");
+  if (buf.length !== 32) throw new Error(`signId: id must be a 32-byte sha256 hex, got ${buf.length} bytes`);
+  return edSign(null, buf, privateKey).toString("base64");
+}
+
+// verifySignatureOverId(idHex, did, sig) -> { ok, reason } — the crypto core shared by
+// diff and event signature verification: did parses to an embedded Ed25519 key, sig is
+// canonical base64 of exactly 64 bytes, and Ed25519 verifies over the id buffer.
+export function verifySignatureOverId(idHex, did, sig) {
+  if (typeof sig !== "string" || sig.length === 0)
+    return { ok: false, reason: "missing sig" };
+  if (typeof did !== "string" || !did.startsWith(DID_PREFIX))
+    return { ok: false, reason: `author is not a ${DID_PREFIX} did` };
+  let pub;
+  try {
+    pub = publicKeyFromDid(did);
+  } catch (e) {
+    return { ok: false, reason: `malformed did: ${e.message}` };
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(sig) || sig.length % 4 !== 0)
+    return { ok: false, reason: "malformed sig: not canonical base64" };
+  const sigBuf = Buffer.from(sig, "base64");
+  if (sigBuf.length !== 64)
+    return { ok: false, reason: `malformed sig: Ed25519 signature must be 64 bytes, got ${sigBuf.length}` };
+  let idBuf;
+  try {
+    idBuf = Buffer.from(idHex, "hex");
+  } catch {
+    return { ok: false, reason: "malformed id: not hex" };
+  }
+  if (idBuf.length !== 32)
+    return { ok: false, reason: `id must be a 32-byte sha256 hex, got ${idBuf.length} bytes` };
+  const ok = edVerify(null, idBuf, pub, sigBuf);
+  return ok
+    ? { ok: true }
+    : { ok: false, reason: "signature does not verify under the author did's embedded public key" };
+}
+
 // generateKeypair() -> { did, publicKey, privateKey }.
 // publicKey/privateKey are node:crypto KeyObjects (pass privateKey to signDiff).
 // Key generation uses crypto-grade entropy; the suite's determinism discipline
